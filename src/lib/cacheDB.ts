@@ -8,14 +8,15 @@ type CacheRecord<T = any> = {
   size: number; // 估算字节数
   updatedAt: number; // ms timestamp
   expireAt?: number; // ms timestamp 可选
+  protected?: boolean; // 是否保护，永久不会被清理
 };
 
 export type CacheOptions = {
-  dbName?: string;
-  storeName?: string;
+  dbName?: string; // 数据库名称
+  storeName?: string; // 表名称
   maxTotalBytes?: number; // 总容量上限（字节） 默认 200MB
-  maxEntryBytes?: number; // 单条数据上限（字节） 默认 20MB
-  defaultTTLSeconds?: number; // 默认过期时间（秒） 默认 3600
+  maxEntryBytes?: number; // 单条数据上限（字节） 默认 30MB
+  defaultTTLSeconds?: number; // 默认过期时间（秒） 默认 3600；如果设置为0，则不自动清理过期数据，但是会因于内存限制自动清理
   writeDebounceMs?: number; // 写入去抖（合并高频更新）默认 50ms
   cleanupIntervalMs?: number; // 后台清理间隔 默认 30s
   enablePersist?: boolean; // 是否向浏览器申请持久化权限
@@ -28,7 +29,7 @@ const DEFAULTS: Required<CacheOptions> = {
   dbName: "bigCacheDB",
   storeName: "cache",
   maxTotalBytes: 200 * 1024 * 1024,
-  maxEntryBytes: 20 * 1024 * 1024,
+  maxEntryBytes: 30 * 1024 * 1024,
   defaultTTLSeconds: 3600,
   writeDebounceMs: 50,
   cleanupIntervalMs: 30 * 1000,
@@ -54,7 +55,7 @@ export class BigCacheDB {
   private db: Dexie;
   private cache!: Table<CacheRecord, string>;
   private options: Required<CacheOptions>;
-  private writeQueue = new Map<string, { data: any; opts?: Partial<CacheOptions> }>();
+  private writeQueue = new Map<string, { data: any; opts?: Partial<CacheOptions & CacheRecord> }>();
   private writeTimer: number | null = null;
   private cleanupTimer: number | null = null;
   private bc: BroadcastChannel | null = null;
@@ -64,7 +65,7 @@ export class BigCacheDB {
     this.options = { ...DEFAULTS, ...(opts || {}) };
     this.db = new Dexie(this.options.dbName);
     this.db.version(1).stores({
-      [this.options.storeName]: "key, module, updatedAt, expireAt, size",
+      [this.options.storeName]: "key, module, updatedAt, expireAt, size, protected",
     });
     // @ts-ignore
     this.cache = this.db.table(this.options.storeName) as unknown as Table<CacheRecord, string>;
@@ -92,7 +93,7 @@ export class BigCacheDB {
    * set cache (batched, debounced for high-frequency updates)
    * expireSeconds: 0 means no-expire
    */
-  async set<T = any>(key: string, data: T, opts?: { expireSeconds?: number; module?: string }) {
+  async set<T = any>(key: string, data: T, opts?: { expireSeconds?: number; module?: string, protected?: boolean }) {
     if (this.isClosed) throw new Error("BigCacheDB is closed");
 
     // estimate size and check single-entry limit
@@ -102,7 +103,7 @@ export class BigCacheDB {
     }
 
     // enqueue write (merge latest)
-    this.writeQueue.set(key, { data: { ...data }, opts: { module: opts?.module, defaultTTLSeconds: opts?.expireSeconds ?? undefined } });
+    this.writeQueue.set(key, { data: { ...data }, opts: { module: opts?.module, defaultTTLSeconds: opts?.expireSeconds ?? undefined, protected: opts?.protected } });
 
     // debounce actual write to batch frequent updates
     if (this.writeTimer) window.clearTimeout(this.writeTimer);
@@ -173,6 +174,7 @@ export class BigCacheDB {
       count: arr.length,
       totalBytes,
       entries: arr.length,
+      protected: arr.filter(r => r.protected).length
     };
   }
 
@@ -205,6 +207,7 @@ export class BigCacheDB {
           data,
           size,
           updatedAt: now,
+          protected: !!opts?.protected,
           expireAt: expireSecs > 0 ? now + expireSecs * 1000 : undefined,
         };
         await this.cache.put(rec);
@@ -229,6 +232,7 @@ export class BigCacheDB {
 
     // delete oldest until under target (note: we delete the absolutely oldest)
     for (const r of rows) {
+      if (r?.protected) continue; // skip protected entries
       await this.cache.delete(r.key);
       total -= r.size || 0;
       this.postBroadcast({ type: "delete", key: r.key });
@@ -254,7 +258,16 @@ export class BigCacheDB {
 
   private async cleanExpired() {
     const now = Date.now();
-    await this.cache.where("expireAt").below(now).delete();
+    // await this.cache.where("expireAt").below(now).delete();
+    const expired = await this.cache
+      .where('expireAt')
+      .below(now)
+      .toArray();
+
+    for (const item of expired) {
+      if (item.protected) continue; // ✅ 保护数据不会因过期而删除
+      await this.cache.delete(item.key);
+    }
   }
 
   // BroadcastChannel multi-tab events
