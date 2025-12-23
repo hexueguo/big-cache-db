@@ -93,7 +93,7 @@ export class BigCacheDB {
    * set cache (batched, debounced for high-frequency updates)
    * expireSeconds: 0 means no-expire
    */
-  async set<T = any>(key: string, data: T, opts?: { expireSeconds?: number; module?: string, protected?: boolean }) {
+  async set<T = any>(key: string, data: T, opts?: { expireSeconds?: number; module?: string; protected?: boolean }) {
     if (this.isClosed) throw new Error("BigCacheDB is closed");
 
     // estimate size and check single-entry limit
@@ -102,8 +102,17 @@ export class BigCacheDB {
       throw new Error(`Entry too large: ${size} bytes > maxEntryBytes ${this.options.maxEntryBytes}`);
     }
 
+    // 判断是否为对象
+    function isPlainObject(val: any) {
+      return Object.prototype.toString.call(val) === "[object Object]";
+    }
+    // 保证数据的类型为Array或Object
+    const safeData = Array.isArray(data) ? data.slice() : isPlainObject(data) ? { ...data } : data;
     // enqueue write (merge latest)
-    this.writeQueue.set(key, { data: { ...data }, opts: { module: opts?.module, defaultTTLSeconds: opts?.expireSeconds ?? undefined, protected: opts?.protected } });
+    this.writeQueue.set(key, {
+      data: safeData,
+      opts: { module: opts?.module, defaultTTLSeconds: opts?.expireSeconds ?? undefined, protected: opts?.protected },
+    });
 
     // debounce actual write to batch frequent updates
     if (this.writeTimer) window.clearTimeout(this.writeTimer);
@@ -174,7 +183,7 @@ export class BigCacheDB {
       count: arr.length,
       totalBytes,
       entries: arr.length,
-      protected: arr.filter(r => r.protected).length
+      protected: arr.filter((r) => r.protected).length,
     };
   }
 
@@ -259,10 +268,7 @@ export class BigCacheDB {
   private async cleanExpired() {
     const now = Date.now();
     // await this.cache.where("expireAt").below(now).delete();
-    const expired = await this.cache
-      .where('expireAt')
-      .below(now)
-      .toArray();
+    const expired = await this.cache.where("expireAt").below(now).toArray();
 
     for (const item of expired) {
       if (item.protected) continue; // ✅ 保护数据不会因过期而删除
