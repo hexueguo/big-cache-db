@@ -67,7 +67,7 @@ export class BigCacheDB {
     this.db.version(1).stores({
       [this.options.storeName]: "key, module, updatedAt, expireAt, size, protected",
     });
-    // @ts-ignore
+     // @ts-ignore
     this.cache = this.db.table(this.options.storeName) as unknown as Table<CacheRecord, string>;
 
     if (this.options.enableBroadcast && typeof window !== "undefined" && "BroadcastChannel" in window) {
@@ -107,7 +107,7 @@ export class BigCacheDB {
       return Object.prototype.toString.call(val) === "[object Object]";
     }
     // 保证数据的类型为Array或Object
-    const safeData = Array.isArray(data) ? data.slice() : isPlainObject(data) ? { ...data } : data;
+    const safeData = Array.isArray(data) ? [...data] : isPlainObject(data) ? { ...data } : data;
     // enqueue write (merge latest)
     this.writeQueue.set(key, {
       data: safeData,
@@ -138,7 +138,7 @@ export class BigCacheDB {
     this.postBroadcast({ type: "set", key });
   }
 
-  async get<T = any>(key: string): Promise<T | null> {
+  async get<T = any>(key: string, updateAccessTime: boolean = true): Promise<T | null> {
     const row = await this.cache.get(key);
     if (!row) return null;
     if (row.expireAt && row.expireAt < Date.now()) {
@@ -147,7 +147,9 @@ export class BigCacheDB {
       return null;
     }
     // update access time for LRU - mark updatedAt
-    await this.cache.update(key, { updatedAt: Date.now() });
+    if (updateAccessTime) {
+      await this.cache.update(key, { updatedAt: Date.now() });
+    }
     return row.data as T;
   }
 
@@ -292,6 +294,8 @@ export class BigCacheDB {
     try {
       const ev = new CustomEvent("big-cache-event", { detail: msg });
       window.dispatchEvent(ev);
-    } catch (e) {}
+    } catch (e) {
+      console.error('Error handling broadcast:', e);
+    }
   }
 }

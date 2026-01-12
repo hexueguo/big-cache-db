@@ -15,5 +15,12 @@ export function createCacheDB(options?: CacheOptions): BigCacheDB {
   const newInstance = new BigCacheDB(options);
   cacheInstances.set(instanceKey, newInstance);
   
+  // 添加清理机制，在页面卸载时关闭所有实例
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', () => {
+      newInstance.close().catch(console.error);
+    });
+  }
+  
   return newInstance;
 }
